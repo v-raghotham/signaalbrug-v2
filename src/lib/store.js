@@ -47,11 +47,17 @@ function notify() {
   listeners.forEach((fn) => fn(db));
 }
 
+function replaceFromRemote(data) {
+  Object.assign(db, data);
+  save();
+  notify();
+}
+
 export const SBStore = {
   version: 0,
   get: () => db,
   subscribe(fn) { listeners.add(fn); return () => listeners.delete(fn); },
-  update(mutator) { mutator(db); save(); notify(); fb.mirror(); },
+  update(mutator) { mutator(db); save(); notify(); if (!fb._applyingRemote) fb.mirror(); },
   reset() { db = freshDb(); save(); notify(); },
   session: {
     get() { try { return JSON.parse(localStorage.getItem(LS_SESSION)); } catch { return null; } },
@@ -237,8 +243,10 @@ export async function decryptCase(b64, token) {
    cost until a config is provided — either VITE_FIREBASE_* env vars at build
    time or a pasted JSON config in the staff settings drawer at runtime. */
 export const fb = {
-  status: "off", error: null, fs: null,
-  _api: null, // { doc, setDoc, getDoc }
+  status: "off", error: null, fs: null, auth: null, user: null,
+  _api: null, // { doc, setDoc, getDoc, onSnapshot, getAuth, signInAnonymously }
+  _unsubscribe: null,
+  _applyingRemote: false,
 
   async connect(configJson) {
     try {
@@ -246,12 +254,17 @@ export const fb = {
       if (!config.projectId || !config.apiKey) throw new Error("Config needs at least apiKey and projectId");
       fb.status = "loading"; notify();
       const { initializeApp, getApps, getApp } = await import("firebase/app");
-      const { getFirestore, doc, setDoc, getDoc } = await import("firebase/firestore");
+      const { getFirestore, doc, setDoc, getDoc, onSnapshot } = await import("firebase/firestore");
+      const { getAuth, signInAnonymously } = await import("firebase/auth");
       const app = getApps().length ? getApp() : initializeApp(config);
       fb.fs = getFirestore(app);
-      fb._api = { doc, setDoc, getDoc };
+      fb.auth = getAuth(app);
+      const cred = fb.auth.currentUser ? { user: fb.auth.currentUser } : await signInAnonymously(fb.auth);
+      fb.user = cred.user;
+      fb._api = { doc, setDoc, getDoc, onSnapshot, getAuth, signInAnonymously };
       fb.status = "connected"; fb.error = null;
       SBStore.update((d) => { d.settings.dataSource = "firebase"; d.settings.firebaseConfig = typeof configJson === "string" ? configJson : JSON.stringify(configJson); });
+      fb.subscribe();
       return true;
     } catch (e) {
       fb.status = "error"; fb.error = e.message; notify();
@@ -260,8 +273,27 @@ export const fb = {
   },
 
   disconnect() {
+    if (fb._unsubscribe) fb._unsubscribe();
+    fb._unsubscribe = null;
     fb.status = "off"; fb.fs = null; fb._api = null;
     SBStore.update((d) => { d.settings.dataSource = "local"; });
+  },
+
+  subscribe() {
+    if (fb._unsubscribe || !fb.fs || !fb._api) return;
+    const { doc, onSnapshot } = fb._api;
+    fb._unsubscribe = onSnapshot(doc(fb.fs, "signaalbrug", "snapshot"), (snap) => {
+      if (!snap.exists()) return;
+      try {
+        const next = JSON.parse(snap.data().json);
+        fb._applyingRemote = true;
+        replaceFromRemote(next);
+      } catch (e) {
+        fb.error = e.message; notify();
+      } finally {
+        fb._applyingRemote = false;
+      }
+    }, (e) => { fb.error = e.message; notify(); });
   },
 
   mirror() {
