@@ -263,10 +263,15 @@ export const fb = {
       fb.user = cred.user;
       fb._api = { doc, setDoc, getDoc, onSnapshot, getAuth, signInAnonymously };
       fb.status = "connected"; fb.error = null;
+      fb._applyingRemote = true;
       SBStore.update((d) => { d.settings.dataSource = "firebase"; d.settings.firebaseConfig = typeof configJson === "string" ? configJson : JSON.stringify(configJson); });
+      fb._applyingRemote = false;
       fb.subscribe();
+      const hasRemoteSnapshot = await fb.pull();
+      if (!hasRemoteSnapshot) fb.mirror();
       return true;
     } catch (e) {
+      fb._applyingRemote = false;
       fb.status = "error"; fb.error = e.message; notify();
       return false;
     }
@@ -312,10 +317,12 @@ export const fb = {
       const snap = await getDoc(doc(fb.fs, "signaalbrug", "snapshot"));
       if (snap.exists()) {
         const data = JSON.parse(snap.data().json);
-        SBStore.update((d) => Object.assign(d, data));
+        fb._applyingRemote = true;
+        replaceFromRemote(data);
+        fb._applyingRemote = false;
         return true;
       }
-    } catch (e) { fb.error = e.message; notify(); }
+    } catch (e) { fb._applyingRemote = false; fb.error = e.message; notify(); }
     return false;
   },
 };
